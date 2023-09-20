@@ -10,3 +10,4 @@
 * Alex started talking about labels being noisy
 * Review the think that we did last for create dataset:
   * picking a tight cluster of "actives" and finding the most dissimilar from Enamine
+* using physiology dataset for this task as non chemical dataset
