@@ -126,6 +126,7 @@ def scaffold_split(smiles):
     return train, val_id, test_id, val_ood, test_ood, ood_val_df, ood_test_df
 
 
+# TODO THIS IS BROKEN NEED TO FIX
 def size_split(smiles):
     # Split
     train_size, val_size, test_size = 0.8 * len(smiles), 0.1 * len(smiles), 0.1 * len(smiles)
