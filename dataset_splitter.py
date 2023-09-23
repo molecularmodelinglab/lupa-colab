@@ -1,7 +1,6 @@
-import sys
 import os
 import random
-from collections import defaultdict
+from collections import defaultdict, Counter
 from typing import Dict, Union, Set
 
 import pandas as pd
@@ -10,6 +9,8 @@ import numpy as np
 from rdkit import Chem
 from rdkit.Chem import AllChem
 from rdkit.Chem.Scaffolds import MurckoScaffold
+
+from sklearn.decomposition import PCA
 
 
 def generate_scaffold(mol, include_chirality: bool = False) -> str:
@@ -55,35 +56,44 @@ def scaffold_split(smiles):
     scaffold_to_indices = {key: (val, len(Chem.MolFromSmiles(key).GetAtoms())) for key, val in
                            scaffold_to_indices.items()}
 
-    l = sorted(list(scaffold_to_indices.items()), key=lambda x: x[-1][-1])
-    scaffold_to_indices = dict(l)
+    _sizes = [_[1] for _ in scaffold_to_indices.values()]
+    size_counts = Counter(_sizes)
+    size_ranks = sorted([(key, val) for key, val in size_counts.items()], key=lambda x: x[1], reverse=True)
+
+    _scaffold_to_indices = {}
+    for (key, _) in size_ranks:
+        for _key, _val in scaffold_to_indices.items():
+            if _val[1] == key:
+                _scaffold_to_indices[_key] = _val
+    scaffold_to_indices = _scaffold_to_indices
+
     domain_sizes = {}
 
-    _max_id_size = 0
+    _id_size_set = set()
     for i, (_scaf, (index_set, _size)) in enumerate(scaffold_to_indices.items()):
         domain_sizes[i] = _size
         if len(id_data) + len(index_set) <= train_size:
-            if _size > _max_id_size:
-                _max_id_size = _size
+            _id_size_set.add(_size)
             id_data += index_set
-            id_data_domain_ids.append(i)
+            id_data_domain_ids.append(_scaf)
             id_data_domain_count += 1
         elif len(val_ood) + len(index_set) <= val_size:
             val_ood += index_set
             val_ood_membership += [i for _ in range(len(index_set))]
-            _dist = _size - _max_id_size
+            _dist = np.min([np.abs(_size - _) for _ in _id_size_set])
             val_ood_distance += [_dist for _ in range(len(index_set))]
             val_ood_domain_ids.append(i)
             val_ood_domain_count += 1
         else:
             test_ood += index_set
-            val_ood_membership += [i for _ in range(len(index_set))]
-            _dist = _size - _max_id_size
-            val_ood_distance += [_dist for _ in range(len(index_set))]
+            test_ood_membership += [i for _ in range(len(index_set))]
+            _dist = np.min([np.abs(_size - _) for _ in _id_size_set])
+            test_ood_distance += [_dist for _ in range(len(index_set))]
             test_ood_domain_ids.append(i)
             test_ood_domain_count += 1
 
     # round 2
+    train_size, val_size, test_size = 0.8 * len(id_data), 0.1 * len(id_data), 0.1 * len(id_data)
     train, val_id, test_id = [], [], []
     train_id_domain_count, val_id_domain_count, test_id_domain_count = 0, 0, 0
     train_domain_ids, val_id_domain_ids, test_id_domain_ids = [], [], []
@@ -94,12 +104,12 @@ def scaffold_split(smiles):
     random.shuffle(l)
     id_scaffold_indices = dict(l)
 
-    for i, (index_set, _size) in enumerate(id_scaffold_indices.items()):
-        if len(id_data) + len(index_set) <= train_size:
+    for i, (index_set, _size) in id_scaffold_indices.items():
+        if len(train) + len(index_set) <= train_size:
             train += index_set
             train_domain_ids.append(i)
             train_id_domain_count += 1
-        elif len(val_ood) + len(index_set) <= val_size:
+        elif len(val_id) + len(index_set) <= val_size:
             val_id += index_set
             val_id_domain_ids.append(i)
             val_id_domain_count += 1
@@ -107,13 +117,6 @@ def scaffold_split(smiles):
             test_id += index_set
             test_id_domain_ids.append(i)
             test_id_domain_count += 1
-
-    # Map from indices to data
-    # train = [smiles[i] for i in train]
-    # val_ood = [smiles[i] for i in val_ood]
-    # test_ood = [smiles[i] for i in test_ood]
-    # val_id = [smiles[i] for i in val_id]
-    # test_id = [smiles[i] for i in test_id]
 
     ood_val_df = pd.DataFrame(
         {"domain_id": val_ood_membership, "ood_dist": val_ood_distance})
@@ -149,7 +152,7 @@ def size_split(smiles):
             if _size > _max_id_size:
                 _max_id_size = _size
             id_data += index_set
-            id_data_domain_ids.append(i)
+            id_data_domain_ids.append(_scaf)
             id_data_domain_count += 1
         elif len(val_ood) + len(index_set) <= val_size:
             val_ood += index_set
@@ -177,7 +180,7 @@ def size_split(smiles):
     random.shuffle(l)
     id_size_indices = dict(l)
 
-    for i, (index_set, _size) in enumerate(id_size_indices.items()):
+    for i, (index_set, _size) in id_size_indices.items():
         if len(id_data) + len(index_set) <= train_size:
             train += index_set
             train_domain_ids.append(i)
@@ -241,6 +244,7 @@ if __name__ == '__main__':
 
     data = pd.read_csv(args.input)
     data = data[[args.smi_col, args.label_col]]
+    data.dropna(inplace=True)
     data["ROMol"] = data[args.smi_col].apply(Chem.MolFromSmiles)
 
     _tmp = data.dropna()
@@ -258,15 +262,23 @@ if __name__ == '__main__':
 
     os.makedirs(args.output, exist_ok=True)
 
+    del data["ROMol"]
+
+    _pca = PCA(n_components=int(args.pca)) if args.pca is not None else None
     for _name, idxs in [("train", train), ("val_id", val_id), ("test_id", test_id), ("val_ood", val_ood), ("test_ood", test_ood)]:
-        _df = data.iloc[idxs].copy()
-        fps = pd.DataFrame(np.array([smi2fp(_) for _ in _df[args.smi_col]]))
+        _df = data.iloc[idxs].copy().reset_index(drop=True)
+        _fps = np.array([smi2fp(_) for _ in _df[args.smi_col]])
+        if _pca:
+            if _name == "train":
+                _pca.fit(_fps)
+            _fps = _pca.transform(_fps)
+        fps = pd.DataFrame(_fps).reset_index(drop=True)
         fps.columns = [f"fp_{i+1}" for i in range(len(fps.columns))]
         if _name == "val_ood":
-            _df = pd.concat((_df, ood_val_df), axis=1)
+            _df = pd.concat((_df, ood_val_df), axis=1).reset_index(drop=True)
         if _name == "test_ood":
-            _df = pd.concat((_df, ood_test_df), axis=1)
-        _df = pd.concat((_df, fps), axis=1)
+            _df = pd.concat((_df, ood_test_df), axis=1).reset_index(drop=True)
+        _df = pd.concat((_df, fps), axis=1).reset_index(drop=True)
         _df.to_csv(os.path.join(args.output, f"{_name}.csv"), index=False)
 
     print(f"wrote files to {args.output}")
